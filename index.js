@@ -15,7 +15,6 @@ const TRASH_ICON = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" s
 const FONT_ICON = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 7V4h16v3"/><path d="M9 20h6"/><path d="M12 4v16"/></svg>`;
 
 const FONT_EXTS = [".ttf", ".otf", ".woff2", ".woff"];
-const FONT_SIZE_BASELINE = 16;
 
 /* ─── Utility Functions ─── */
 
@@ -27,15 +26,6 @@ function safeMsg(err) {
 function s(v, d) {
   if (d === undefined) d = "";
   return typeof v === "string" ? v : d;
-}
-
-function fmtPx(n) {
-  var v = Number(n);
-  if (!isFinite(v)) return "0";
-  var rounded = Math.round(v * 1000) / 1000;
-  var out = String(rounded);
-  if (out.indexOf(".") >= 0) out = out.replace(/0+$/, "").replace(/\.$/, "");
-  return out;
 }
 
 function getToken() {
@@ -134,6 +124,25 @@ function getExtFromFilename(filename) {
   return "";
 }
 
+function fontFormatFromExt(extRaw) {
+  var ext = String(extRaw || "").toLowerCase();
+  if (ext === ".otf") return "opentype";
+  if (ext === ".woff2") return "woff2";
+  if (ext === ".woff") return "woff";
+  return "truetype";
+}
+
+function isReadonlyOrPublish() {
+  try {
+    var siyuan = globalThis && globalThis.siyuan;
+    var readonly = !!(siyuan && siyuan.config && siyuan.config.readonly);
+    var publish = !!(siyuan && siyuan.isPublish);
+    return readonly || publish;
+  } catch (e) {
+    return false;
+  }
+}
+
 /* ─── SiYuan File API ─── */
 
 async function putFile(filePath, data) {
@@ -183,17 +192,15 @@ class FontManagerPlugin extends Plugin {
     this.mainDialog = null;
     this._renderFontList = null; // callback set by UI
     this._dragCleanup = null; // drag event cleanup
-    this._fontBlobUrls = {}; // fontId → blob URL cache
-    this._fontSizePatches = new Map(); // element -> original inline font-size
-    this._fontSizeObserver = null;
-    this._fontSizeDelta = 0;
-    this._fontSizeReapplyTimer = null;
+    this._fontBlobUrls = {}; // fontId -> blob URL cache (active-font fallback)
 
-    this.addTopBar({
-      icon: TOPBAR_ICON,
-      title: this.t("fontManager"),
-      callback: () => this.showFontManager(),
-    });
+    if (!isReadonlyOrPublish()) {
+      this.addTopBar({
+        icon: TOPBAR_ICON,
+        title: this.t("fontManager"),
+        callback: () => this.showFontManager(),
+      });
+    }
     this.addCommand({
       langKey: "fontManager",
       langText: this.t("fontManager"),
@@ -445,7 +452,6 @@ class FontManagerPlugin extends Plugin {
       }
     }
 
-    // Remove cached blob URL
     if (this._fontBlobUrls && this._fontBlobUrls[id]) {
       try { URL.revokeObjectURL(this._fontBlobUrls[id]); } catch (e) { /* ignore */ }
       delete this._fontBlobUrls[id];
@@ -476,148 +482,9 @@ class FontManagerPlugin extends Plugin {
 
   /* ── CSS Injection ── */
 
-  _isFontSizeScalableElement(el) {
-    if (!(el instanceof HTMLElement)) return false;
-    var tag = el.tagName;
-    if (tag === "SCRIPT" || tag === "STYLE" || tag === "NOSCRIPT" || tag === "SVG") return false;
-    if (el.closest("svg")) return false;
-    var classes = el.classList ? Array.from(el.classList) : [];
-    for (var i = 0; i < classes.length; i++) {
-      var cls = String(classes[i] || "").toLowerCase();
-      if (!cls) continue;
-      if (cls === "b3-icon" || cls === "fn__icon" || cls === "icon") return false;
-      if (cls === "iconfont" || cls.indexOf("iconfont") >= 0) return false;
-      if (cls.endsWith("__icon") || cls.startsWith("icon-")) return false;
-    }
-    return true;
-  }
-
-  _hasTextBearingContent(el) {
-    if (!(el instanceof HTMLElement)) return false;
-    if (el.isContentEditable) return true;
-    var tag = el.tagName;
-    if (
-      tag === "INPUT" ||
-      tag === "TEXTAREA" ||
-      tag === "SELECT" ||
-      tag === "OPTION" ||
-      tag === "BUTTON" ||
-      tag === "LABEL"
-    ) {
-      return true;
-    }
-    var nodes = el.childNodes;
-    for (var i = 0; i < nodes.length; i++) {
-      var node = nodes[i];
-      if (!node || node.nodeType !== 3) continue;
-      if (/\S/.test(String(node.nodeValue || ""))) return true;
-    }
-    return false;
-  }
-
-  _snapshotFontSizeTargets(roots) {
-    var targets = [];
-    var seen = new Set();
-    var self = this;
-
-    function pushTarget(el) {
-      if (!(el instanceof HTMLElement)) return;
-      if (seen.has(el)) return;
-      seen.add(el);
-      if (!self._isFontSizeScalableElement(el)) return;
-      if (self._fontSizePatches && self._fontSizePatches.has(el)) return;
-      if (!self._hasTextBearingContent(el)) return;
-
-      var style = getComputedStyle(el);
-      if (!style) return;
-      if (style.display === "none" || style.visibility === "hidden") return;
-      var ownSize = parseFloat(style.fontSize);
-      if (!isFinite(ownSize) || ownSize <= 0) return;
-
-      targets.push({ el: el, size: ownSize });
-    }
-
-    for (var i = 0; i < roots.length; i++) {
-      var root = roots[i];
-      if (!(root instanceof HTMLElement)) continue;
-      pushTarget(root);
-      var all = root.querySelectorAll("*");
-      for (var j = 0; j < all.length; j++) pushTarget(all[j]);
-    }
-    return targets;
-  }
-
-  _applyFontSizeDeltaToRoots(roots, delta) {
-    if (!delta || !roots || !roots.length) return;
-    var targets = this._snapshotFontSizeTargets(roots);
-    for (var i = 0; i < targets.length; i++) {
-      var item = targets[i];
-      var el = item.el;
-      if (!this._fontSizePatches.has(el)) {
-        this._fontSizePatches.set(el, {
-          value: el.style.getPropertyValue("font-size"),
-          priority: el.style.getPropertyPriority("font-size"),
-        });
-      }
-      var nextSize = item.size + delta;
-      if (nextSize < 1) nextSize = 1;
-      el.style.setProperty("font-size", fmtPx(nextSize) + "px", "important");
-      el.dataset.fontManagerSizePatched = "1";
-    }
-  }
-
-  _scheduleFontSizeReapply() {
-    var plugin = this;
-    if (this._fontSizeReapplyTimer) clearTimeout(this._fontSizeReapplyTimer);
-    this._fontSizeReapplyTimer = setTimeout(function () {
-      plugin._fontSizeReapplyTimer = null;
-      if (!plugin.settingsData || !(plugin.settingsData.fontSize > 0)) return;
-      void plugin.applyInstalledFonts();
-    }, 120);
-  }
-
-  _startFontSizeObserver(delta) {
-    this._stopFontSizeObserver();
-    if (!delta || !document || !document.body || typeof MutationObserver === "undefined") return;
-    this._fontSizeDelta = delta;
-    var plugin = this;
-    this._fontSizeObserver = new MutationObserver(function (mutations) {
-      for (var i = 0; i < mutations.length; i++) {
-        if (mutations[i].addedNodes && mutations[i].addedNodes.length) {
-          plugin._scheduleFontSizeReapply();
-          return;
-        }
-      }
-    });
-    this._fontSizeObserver.observe(document.body, { childList: true, subtree: true });
-  }
-
-  _stopFontSizeObserver() {
-    if (this._fontSizeObserver) {
-      try { this._fontSizeObserver.disconnect(); } catch (e) { /* ignore */ }
-      this._fontSizeObserver = null;
-    }
-    if (this._fontSizeReapplyTimer) {
-      clearTimeout(this._fontSizeReapplyTimer);
-      this._fontSizeReapplyTimer = null;
-    }
-    this._fontSizeDelta = 0;
-  }
-
-  _clearFontSizePatches() {
-    this._stopFontSizeObserver();
-    if (!this._fontSizePatches) this._fontSizePatches = new Map();
-    this._fontSizePatches.forEach(function (record, el) {
-      if (!(el instanceof HTMLElement)) return;
-      if (record && record.value) el.style.setProperty("font-size", record.value, record.priority || "");
-      else el.style.removeProperty("font-size");
-      delete el.dataset.fontManagerSizePatched;
-    });
-    this._fontSizePatches.clear();
-  }
-
   async _ensureFontBlobUrl(font) {
-    if (this._fontBlobUrls[font.id]) return this._fontBlobUrls[font.id];
+    if (!font || !font.id || !font.filePath) return "";
+    if (this._fontBlobUrls && this._fontBlobUrls[font.id]) return this._fontBlobUrls[font.id];
     try {
       var resp = await fetch("/api/file/getFile", {
         method: "POST",
@@ -627,10 +494,11 @@ class FontManagerPlugin extends Plugin {
       if (!resp.ok) throw new Error("HTTP " + resp.status);
       var blob = await resp.blob();
       var blobUrl = URL.createObjectURL(blob);
+      if (!this._fontBlobUrls) this._fontBlobUrls = {};
       this._fontBlobUrls[font.id] = blobUrl;
       return blobUrl;
     } catch (e) {
-      console.error("[font-manager] Failed to load font blob:", font.name, e);
+      console.error("[font-manager] Failed to load active font blob fallback:", font.name || font.family, e);
       return "";
     }
   }
@@ -639,7 +507,7 @@ class FontManagerPlugin extends Plugin {
     var urls = this._fontBlobUrls;
     if (!urls) return;
     for (var id in urls) {
-      if (urls.hasOwnProperty(id)) {
+      if (Object.prototype.hasOwnProperty.call(urls, id)) {
         try { URL.revokeObjectURL(urls[id]); } catch (e) { /* ignore */ }
       }
     }
@@ -653,48 +521,41 @@ class FontManagerPlugin extends Plugin {
     this.removeInjectedStyles();
 
     var rules = [];
-    var allFonts = this.settingsData.installedFonts;
+    var rootLangSelector = [
+      ":root",
+      ":root:lang(zh_CN)",
+      ":root:lang(zh_CHT)",
+      ":root:lang(en_US)",
+      ":root:lang(ja_JP)",
+    ].join(",\n");
 
-    // Register @font-face for ALL installed fonts using Blob URLs
-    for (var i = 0; i < allFonts.length; i++) {
-      var f = allFonts[i];
-      if (!f.filePath || !f.family) continue;
-      var format = "truetype";
-      var ext = String(f.fileExt || "").toLowerCase();
-      if (ext === ".otf") format = "opentype";
-      else if (ext === ".woff2") format = "woff2";
-      else if (ext === ".woff") format = "woff";
+    // Apply active font globally
+    var activeFamily = this.settingsData.activeFont;
+    var activeFontRecord = activeFamily ? this.getInstalledFontByFamily(activeFamily) : null;
+    var activeBlobUrl = "";
+    if (activeFontRecord) {
+      activeBlobUrl = await this._ensureFontBlobUrl(activeFontRecord);
+    }
 
-      var blobUrl = await this._ensureFontBlobUrl(f);
-      if (!blobUrl) continue;
+    // Bail out if a newer call has been made while we were awaiting
+    if (this._applySeq !== seq) return;
 
+    if (activeFontRecord && activeBlobUrl) {
+      var activeFormat = fontFormatFromExt(activeFontRecord.fileExt);
       rules.push(
         "@font-face {\n" +
-        "  font-family: '" + f.family.replace(/'/g, "\\'") + "';\n" +
+        "  font-family: '" + activeFamily.replace(/'/g, "\\'") + "';\n" +
         "  font-weight: 100 900;\n" +
-        "  src: url('" + blobUrl + "') format('" + format + "');\n" +
+        "  src: url('" + activeBlobUrl + "') format('" + activeFormat + "');\n" +
         "  font-style: normal;\n" +
         "  font-display: swap;\n" +
         "}"
       );
     }
 
-    // Bail out if a newer call has been made while we were awaiting
-    if (this._applySeq !== seq) return;
-
-    // Apply active font globally
-    var activeFamily = this.settingsData.activeFont;
-    var activeFontRecord = activeFamily ? this.getInstalledFontByFamily(activeFamily) : null;
     if (activeFontRecord && activeFamily) {
       var escapedFamily = activeFamily.replace(/'/g, "\\'");
       var fontStack = "'" + escapedFamily + "', 'Emojis Additional', 'Emojis Reset', BlinkMacSystemFont, Helvetica, 'PingFang SC', 'Luxi Sans', 'DejaVu Sans', 'Hiragino Sans GB', 'Source Han Sans SC', arial, 'Microsoft Yahei', sans-serif, emojis";
-      var rootLangSelector = [
-        ":root",
-        ":root:lang(zh_CN)",
-        ":root:lang(zh_CHT)",
-        ":root:lang(en_US)",
-        ":root:lang(ja_JP)",
-      ].join(",\n");
 
       rules.push(
         rootLangSelector + " {\n" +
@@ -725,9 +586,15 @@ class FontManagerPlugin extends Plugin {
       );
     }
 
-    // Apply font size (text-only scaling — layout unchanged)
+    // Apply font size via root variable to avoid repeated inline size accumulation
     var fontSize = this.settingsData.fontSize;
-    var fontDelta = fontSize > 0 ? (fontSize - FONT_SIZE_BASELINE) : 0;
+    if (fontSize > 0) {
+      rules.push(
+        rootLangSelector + " {\n" +
+        "  --b3-font-size: " + String(fontSize) + "px !important;\n" +
+        "}"
+      );
+    }
 
     if (rules.length) {
       var style = document.createElement("style");
@@ -736,12 +603,6 @@ class FontManagerPlugin extends Plugin {
       style.textContent = rules.join("\n\n");
       document.head.appendChild(style);
       this.injectedStyleEl = style;
-    }
-
-    if (fontDelta) {
-      var initialRoot = document && document.body ? document.body : document.documentElement;
-      this._applyFontSizeDeltaToRoots([initialRoot], fontDelta);
-      this._startFontSizeObserver(fontDelta);
     }
 
     // Preload active font
@@ -754,7 +615,6 @@ class FontManagerPlugin extends Plugin {
   }
 
   removeInjectedStyles() {
-    this._clearFontSizePatches();
     if (this.injectedStyleEl) {
       this.injectedStyleEl.remove();
       this.injectedStyleEl = null;

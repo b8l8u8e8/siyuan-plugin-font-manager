@@ -123,7 +123,6 @@ jobs:
 
           ROOT_ITEMS=(
             i18n
-            CHANGELOG.md
             LICENSE
             README.md
             README_zh_CN.md
