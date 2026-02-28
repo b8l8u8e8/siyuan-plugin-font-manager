@@ -144,7 +144,6 @@ jobs:
 
           zip -r package.zip \
             i18n \
-            CHANGELOG.md \
             LICENSE \
             README.md \
             README_zh_CN.md \
