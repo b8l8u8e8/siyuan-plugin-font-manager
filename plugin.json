@@ -1,0 +1,29 @@
+{
+  "name": "siyuan-plugin-font-manager",
+  "author": "取舍",
+  "url": "https://github.com/b8l8u8e8/siyuan-plugin-font-manager",
+  "version": "0.1.0",
+  "minAppVersion": "2.9.0",
+  "backends": [
+    "all"
+  ],
+  "frontends": [
+    "all"
+  ],
+  "displayName": {
+    "default": "Font Manager",
+    "zh_CN": "字体管理器"
+  },
+  "description": {
+    "default": "Import, manage, and apply custom fonts in SiYuan Notes.",
+    "zh_CN": "在思源笔记中导入、管理和应用自定义字体。"
+  },
+  "readme": {
+    "default": "README.md",
+    "zh_CN": "README_zh_CN.md"
+  },
+  "keywords": [
+    "font",
+    "字体"
+  ]
+}
