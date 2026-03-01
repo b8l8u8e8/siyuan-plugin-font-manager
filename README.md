@@ -39,7 +39,7 @@ Import, manage, and apply custom fonts directly within SiYuan.
 
 Imported font files are saved in:
 
-- `/data/storage/petal/siyuan-plugin-font-manager/fonts`
+- `/data/public/siyuan-plugin-font-manager/fonts`
 
 ---
 

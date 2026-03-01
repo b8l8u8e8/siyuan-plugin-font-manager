@@ -39,7 +39,7 @@
 
 导入的字体文件保存在：
 
-- `/data/storage/petal/siyuan-plugin-font-manager/fonts`
+- `/data/public/siyuan-plugin-font-manager/fonts`
 
 ---
 

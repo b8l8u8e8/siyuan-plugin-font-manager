@@ -4,7 +4,8 @@ const { Plugin, showMessage, Setting, Dialog } = require("siyuan");
 
 const PLUGIN_NAME = "siyuan-plugin-font-manager";
 const STORAGE_KEY = "settings";
-const FONT_DIR = `/data/storage/petal/${PLUGIN_NAME}/fonts`;
+const FONT_DIR = `/data/public/${PLUGIN_NAME}/fonts`;
+const LEGACY_FONT_DIR = `/data/storage/petal/${PLUGIN_NAME}/fonts`;
 
 const TOPBAR_ICON = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 7V4h16v3"/><path d="M9 20h6"/><path d="M12 4v16"/></svg>`;
 
@@ -192,7 +193,6 @@ class FontManagerPlugin extends Plugin {
     this.mainDialog = null;
     this._renderFontList = null; // callback set by UI
     this._dragCleanup = null; // drag event cleanup
-    this._fontBlobUrls = {}; // fontId -> blob URL cache (active-font fallback)
 
     if (!isReadonlyOrPublish()) {
       this.addTopBar({
@@ -200,12 +200,12 @@ class FontManagerPlugin extends Plugin {
         title: this.t("fontManager"),
         callback: () => this.showFontManager(),
       });
+      this.addCommand({
+        langKey: "fontManager",
+        langText: this.t("fontManager"),
+        callback: () => this.showFontManager(),
+      });
     }
-    this.addCommand({
-      langKey: "fontManager",
-      langText: this.t("fontManager"),
-      callback: () => this.showFontManager(),
-    });
 
     this.setting = new Setting({});
     void this.loadSettingsData().then(() => this.applyInstalledFonts());
@@ -215,7 +215,6 @@ class FontManagerPlugin extends Plugin {
 
   onunload() {
     this.removeInjectedStyles();
-    this._revokeFontBlobUrls();
     if (this._dragCleanup) {
       this._dragCleanup();
       this._dragCleanup = null;
@@ -231,6 +230,10 @@ class FontManagerPlugin extends Plugin {
     // Clean up font files in plugin directory
     try {
       await removeFile(FONT_DIR);
+    } catch (e) { /* directory may not exist */ }
+    // Also clean up old storage path from previous versions
+    try {
+      await removeFile(LEGACY_FONT_DIR);
     } catch (e) { /* directory may not exist */ }
   }
 
@@ -452,11 +455,6 @@ class FontManagerPlugin extends Plugin {
       }
     }
 
-    if (this._fontBlobUrls && this._fontBlobUrls[id]) {
-      try { URL.revokeObjectURL(this._fontBlobUrls[id]); } catch (e) { /* ignore */ }
-      delete this._fontBlobUrls[id];
-    }
-
     // Remove from list
     var idx = this.settingsData.installedFonts.indexOf(font);
     if (idx >= 0) this.settingsData.installedFonts.splice(idx, 1);
@@ -482,41 +480,17 @@ class FontManagerPlugin extends Plugin {
 
   /* ── CSS Injection ── */
 
-  async _ensureFontBlobUrl(font) {
-    if (!font || !font.id || !font.filePath) return "";
-    if (this._fontBlobUrls && this._fontBlobUrls[font.id]) return this._fontBlobUrls[font.id];
-    try {
-      var resp = await fetch("/api/file/getFile", {
-        method: "POST",
-        headers: Object.assign({ "Content-Type": "application/json" }, authHeaders()),
-        body: JSON.stringify({ path: font.filePath }),
-      });
-      if (!resp.ok) throw new Error("HTTP " + resp.status);
-      var blob = await resp.blob();
-      var blobUrl = URL.createObjectURL(blob);
-      if (!this._fontBlobUrls) this._fontBlobUrls = {};
-      this._fontBlobUrls[font.id] = blobUrl;
-      return blobUrl;
-    } catch (e) {
-      console.error("[font-manager] Failed to load active font blob fallback:", font.name || font.family, e);
-      return "";
-    }
+  toPublicUrl(filePath) {
+    var path = String(filePath || "");
+    if (!path || path.indexOf("/data/public/") !== 0) return "";
+    var rel = path.substring("/data/public/".length);
+    if (!rel) return "";
+    return "/public/" + rel.split("/").map(function (seg) {
+      return encodeURIComponent(seg);
+    }).join("/");
   }
 
-  _revokeFontBlobUrls() {
-    var urls = this._fontBlobUrls;
-    if (!urls) return;
-    for (var id in urls) {
-      if (Object.prototype.hasOwnProperty.call(urls, id)) {
-        try { URL.revokeObjectURL(urls[id]); } catch (e) { /* ignore */ }
-      }
-    }
-    this._fontBlobUrls = {};
-  }
-
-  async applyInstalledFonts() {
-    // Sequence guard: only the latest call applies styles
-    var seq = (this._applySeq = (this._applySeq || 0) + 1);
+  applyInstalledFonts() {
 
     this.removeInjectedStyles();
 
@@ -532,28 +506,22 @@ class FontManagerPlugin extends Plugin {
     // Apply active font globally
     var activeFamily = this.settingsData.activeFont;
     var activeFontRecord = activeFamily ? this.getInstalledFontByFamily(activeFamily) : null;
-    var activeBlobUrl = "";
-    if (activeFontRecord) {
-      activeBlobUrl = await this._ensureFontBlobUrl(activeFontRecord);
-    }
+    var activeFontUrl = activeFontRecord ? this.toPublicUrl(activeFontRecord.filePath) : "";
 
-    // Bail out if a newer call has been made while we were awaiting
-    if (this._applySeq !== seq) return;
-
-    if (activeFontRecord && activeBlobUrl) {
+    if (activeFontRecord && activeFontUrl) {
       var activeFormat = fontFormatFromExt(activeFontRecord.fileExt);
       rules.push(
         "@font-face {\n" +
         "  font-family: '" + activeFamily.replace(/'/g, "\\'") + "';\n" +
         "  font-weight: 100 900;\n" +
-        "  src: url('" + activeBlobUrl + "') format('" + activeFormat + "');\n" +
+        "  src: url('" + activeFontUrl + "') format('" + activeFormat + "');\n" +
         "  font-style: normal;\n" +
         "  font-display: swap;\n" +
         "}"
       );
     }
 
-    if (activeFontRecord && activeFamily) {
+    if (activeFontRecord && activeFamily && activeFontUrl) {
       var escapedFamily = activeFamily.replace(/'/g, "\\'");
       var fontStack = "'" + escapedFamily + "', 'Emojis Additional', 'Emojis Reset', BlinkMacSystemFont, Helvetica, 'PingFang SC', 'Luxi Sans', 'DejaVu Sans', 'Hiragino Sans GB', 'Source Han Sans SC', arial, 'Microsoft Yahei', sans-serif, emojis";
 
@@ -606,7 +574,7 @@ class FontManagerPlugin extends Plugin {
     }
 
     // Preload active font
-    if (activeFamily && activeFontRecord && document.fonts && typeof document.fonts.load === "function") {
+    if (activeFamily && activeFontRecord && activeFontUrl && document.fonts && typeof document.fonts.load === "function") {
       try {
         var preloadFamily = activeFamily.replace(/"/g, "");
         void document.fonts.load('16px "' + preloadFamily + '"');
