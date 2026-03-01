@@ -11,11 +11,11 @@ Import, manage, and apply custom fonts directly within SiYuan.
 
 ## 🎨 Features
 
-| Feature           | Description                                                         |
-| ----------------- | ------------------------------------------------------------------- |
-| Font Import       | Drag & drop or browse to import TTF, OTF, WOFF, WOFF2 font files    |
-| Global Application| Apply imported fonts to the entire SiYuan interface                 |
-| Font Size Adjust  | Use the slider to adjust font size (12–24px)                        |
+| Feature            | Description                                                  |
+| ------------------ | ------------------------------------------------------------ |
+| Font Import        | Drag & drop or browse to import TTF, OTF, WOFF, WOFF2 font files |
+| Global Application | Apply imported fonts to the entire SiYuan interface          |
+| Font Size Adjust   | Slider to adjust relative font size (-8 to 8px)              |
 
 ---
 

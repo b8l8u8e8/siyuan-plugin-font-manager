@@ -16,6 +16,8 @@ const TRASH_ICON = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" s
 const FONT_ICON = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 7V4h16v3"/><path d="M9 20h6"/><path d="M12 4v16"/></svg>`;
 
 const FONT_EXTS = [".ttf", ".otf", ".woff2", ".woff"];
+const FONT_SIZE_BASE_ATTR = "data-fm-font-size-base";
+const FONT_SIZE_BASE_VAR = "--fm-base-font-size";
 
 /* ─── Utility Functions ─── */
 
@@ -193,6 +195,8 @@ class FontManagerPlugin extends Plugin {
     this.mainDialog = null;
     this._renderFontList = null; // callback set by UI
     this._dragCleanup = null; // drag event cleanup
+    this._fontSizeObserver = null;
+    this._fontSizeBaseReady = false;
 
     if (!isReadonlyOrPublish()) {
       this.addTopBar({
@@ -215,6 +219,7 @@ class FontManagerPlugin extends Plugin {
 
   onunload() {
     this.removeInjectedStyles();
+    this.clearDomFontSizeBase();
     if (this._dragCleanup) {
       this._dragCleanup();
       this._dragCleanup = null;
@@ -257,7 +262,7 @@ class FontManagerPlugin extends Plugin {
     return {
       installedFonts: [],
       activeFont: "",
-      fontSize: 0,
+      fontSizeDelta: 0,
     };
   }
 
@@ -296,10 +301,20 @@ class FontManagerPlugin extends Plugin {
       }
     }
 
+    var fontSizeDelta = Number(raw.fontSizeDelta);
+    if (!isFinite(fontSizeDelta)) {
+      // Legacy setting: absolute font size slider (12-24), default mapped to 16.
+      var legacyFontSize = Number(raw.fontSize) || 0;
+      fontSizeDelta = legacyFontSize > 0 ? (legacyFontSize - 16) : 0;
+    }
+    fontSizeDelta = Math.round(fontSizeDelta);
+    if (fontSizeDelta < -24) fontSizeDelta = -24;
+    if (fontSizeDelta > 24) fontSizeDelta = 24;
+
     return {
       installedFonts: normalizedInstalled,
       activeFont: activeFont,
-      fontSize: Number(raw.fontSize) || 0,
+      fontSizeDelta: fontSizeDelta,
     };
   }
 
@@ -470,12 +485,127 @@ class FontManagerPlugin extends Plugin {
     showMessage(this.t("deleteSuccess", { name: name }), 3000);
   }
 
-  setFontSize(size) {
-    var val = Number(size) || 0;
-    if (val < 0) val = 0;
-    this.settingsData.fontSize = val;
+  setFontSize(delta) {
+    var val = Math.round(Number(delta) || 0);
+    if (val < -24) val = -24;
+    if (val > 24) val = 24;
+    this.settingsData.fontSizeDelta = val;
     this.applyInstalledFonts();
     void this.saveSettingsData();
+  }
+
+  getRootCssVarPx(varName, fallbackPx) {
+    var fallback = Number(fallbackPx) || 0;
+    try {
+      if (typeof document === "undefined" || !document.documentElement || typeof getComputedStyle !== "function") return fallback;
+      var raw = getComputedStyle(document.documentElement).getPropertyValue(String(varName || ""));
+      var parsed = parseFloat(String(raw || "").trim());
+      if (!isFinite(parsed) || parsed <= 0) return fallback;
+      return parsed;
+    } catch (e) {
+      return fallback;
+    }
+  }
+
+  formatPxValue(px) {
+    var n = Math.round((Number(px) || 0) * 100) / 100;
+    return String(n).replace(/\.0+$/, "").replace(/(\.\d*[1-9])0+$/, "$1");
+  }
+
+  isFontSizePatchTarget(el) {
+    if (!(el instanceof HTMLElement)) return false;
+    var tag = String(el.tagName || "").toUpperCase();
+    if (
+      tag === "SCRIPT" ||
+      tag === "STYLE" ||
+      tag === "LINK" ||
+      tag === "META" ||
+      tag === "NOSCRIPT" ||
+      tag === "SVG" ||
+      tag === "PATH" ||
+      tag === "G" ||
+      tag === "USE" ||
+      tag === "SYMBOL" ||
+      tag === "IMG" ||
+      tag === "CANVAS" ||
+      tag === "VIDEO" ||
+      tag === "AUDIO"
+    ) {
+      return false;
+    }
+    if (el.classList && (el.classList.contains("b3-icon") || el.classList.contains("fn__icon"))) {
+      return false;
+    }
+    return true;
+  }
+
+  captureElementBaseFontSize(el, subtractDelta) {
+    if (!this.isFontSizePatchTarget(el)) return;
+    try {
+      var computed = getComputedStyle(el);
+      if (!computed) return;
+      var px = parseFloat(String(computed.fontSize || "").trim());
+      if (!isFinite(px) || px <= 0) return;
+      var base = px - (Number(subtractDelta) || 0);
+      if (!isFinite(base) || base <= 0) return;
+      el.setAttribute(FONT_SIZE_BASE_ATTR, "1");
+      el.style.setProperty(FONT_SIZE_BASE_VAR, this.formatPxValue(base) + "px");
+    } catch (e) { /* ignore */ }
+  }
+
+  captureDomBaseFontSizes(rootNode, subtractDelta) {
+    var root = rootNode instanceof HTMLElement
+      ? rootNode
+      : ((typeof document !== "undefined" && document.body) ? document.body : null);
+    if (!(root instanceof HTMLElement)) return;
+    this.captureElementBaseFontSize(root, subtractDelta);
+    var nodes = root.querySelectorAll("*");
+    for (var i = 0; i < nodes.length; i++) {
+      this.captureElementBaseFontSize(nodes[i], subtractDelta);
+    }
+  }
+
+  ensureFontSizeObserver() {
+    if (
+      this._fontSizeObserver ||
+      typeof MutationObserver !== "function" ||
+      typeof document === "undefined" ||
+      !document.body
+    ) {
+      return;
+    }
+    var plugin = this;
+    this._fontSizeObserver = new MutationObserver(function (mutations) {
+      var delta = Number(plugin.settingsData && plugin.settingsData.fontSizeDelta) || 0;
+      if (delta === 0) return;
+      for (var i = 0; i < mutations.length; i++) {
+        var added = mutations[i].addedNodes;
+        if (!added || !added.length) continue;
+        for (var j = 0; j < added.length; j++) {
+          var node = added[j];
+          if (!(node instanceof HTMLElement)) continue;
+          // Node is already rendered with current delta, so subtract it to get stable base.
+          plugin.captureDomBaseFontSizes(node, delta);
+        }
+      }
+    });
+    this._fontSizeObserver.observe(document.body, { childList: true, subtree: true });
+  }
+
+  clearDomFontSizeBase() {
+    if (this._fontSizeObserver) {
+      this._fontSizeObserver.disconnect();
+      this._fontSizeObserver = null;
+    }
+    this._fontSizeBaseReady = false;
+    if (typeof document === "undefined") return;
+    var marked = document.querySelectorAll("[" + FONT_SIZE_BASE_ATTR + "='1']");
+    for (var i = 0; i < marked.length; i++) {
+      var el = marked[i];
+      if (!(el instanceof HTMLElement)) continue;
+      el.removeAttribute(FONT_SIZE_BASE_ATTR);
+      el.style.removeProperty(FONT_SIZE_BASE_VAR);
+    }
   }
 
   /* ── CSS Injection ── */
@@ -513,7 +643,7 @@ class FontManagerPlugin extends Plugin {
       rules.push(
         "@font-face {\n" +
         "  font-family: '" + activeFamily.replace(/'/g, "\\'") + "';\n" +
-        "  font-weight: 100 900;\n" +
+        "  font-weight: normal;\n" +
         "  src: url('" + activeFontUrl + "') format('" + activeFormat + "');\n" +
         "  font-style: normal;\n" +
         "  font-display: swap;\n" +
@@ -554,14 +684,29 @@ class FontManagerPlugin extends Plugin {
       );
     }
 
-    // Apply font size via root variable to avoid repeated inline size accumulation
-    var fontSize = this.settingsData.fontSize;
-    if (fontSize > 0) {
+    // Apply font size delta to both UI and editor base sizes.
+    var fontSizeDelta = Number(this.settingsData.fontSizeDelta) || 0;
+    if (fontSizeDelta !== 0) {
+      if (!this._fontSizeBaseReady) {
+        this.captureDomBaseFontSizes(null, 0);
+        this._fontSizeBaseReady = true;
+      }
+      this.ensureFontSizeObserver();
+      var baseUiSize = this.getRootCssVarPx("--b3-font-size", 14);
+      var baseEditorSize = this.getRootCssVarPx("--b3-font-size-editor", 16);
+      var uiSize = Math.max(8, baseUiSize + fontSizeDelta);
+      var editorSize = Math.max(8, baseEditorSize + fontSizeDelta);
       rules.push(
         rootLangSelector + " {\n" +
-        "  --b3-font-size: " + String(fontSize) + "px !important;\n" +
+        "  --b3-font-size: " + this.formatPxValue(uiSize) + "px !important;\n" +
+        "  --b3-font-size-editor: " + this.formatPxValue(editorSize) + "px !important;\n" +
+        "}\n" +
+        "[" + FONT_SIZE_BASE_ATTR + "='1'] {\n" +
+        "  font-size: calc(var(" + FONT_SIZE_BASE_VAR + ") + " + this.formatPxValue(fontSizeDelta) + "px) !important;\n" +
         "}"
       );
+    } else {
+      this.clearDomFontSizeBase();
     }
 
     if (rules.length) {
@@ -598,6 +743,7 @@ class FontManagerPlugin extends Plugin {
         rootStyle.removeProperty("--b3-font-family");
         rootStyle.removeProperty("--b3-font-family-code");
         rootStyle.removeProperty("--b3-font-size");
+        rootStyle.removeProperty("--b3-font-size-editor");
       }
     } catch (e) { /* ignore */ }
   }
@@ -799,14 +945,19 @@ class FontManagerPlugin extends Plugin {
     var sizeSlider = document.createElement("input");
     sizeSlider.type = "range";
     sizeSlider.className = "fm-size-slider";
-    sizeSlider.min = "12";
-    sizeSlider.max = "24";
+    sizeSlider.min = "-8";
+    sizeSlider.max = "8";
     sizeSlider.step = "1";
-    sizeSlider.value = String(plugin.settingsData.fontSize || 16);
+    sizeSlider.value = String(plugin.settingsData.fontSizeDelta || 0);
 
     var sizeDisplay = document.createElement("span");
     sizeDisplay.className = "fm-size-display";
-    sizeDisplay.textContent = plugin.settingsData.fontSize > 0 ? (plugin.settingsData.fontSize + "px") : plugin.t("default");
+    var formatSizeDeltaLabel = function (delta) {
+      var val = Number(delta) || 0;
+      if (val === 0) return plugin.t("default");
+      return (val > 0 ? "+" : "") + String(val) + "px";
+    };
+    sizeDisplay.textContent = formatSizeDeltaLabel(plugin.settingsData.fontSizeDelta || 0);
 
     var sizeReset = document.createElement("button");
     sizeReset.type = "button";
@@ -819,13 +970,13 @@ class FontManagerPlugin extends Plugin {
 
     sizeSlider.addEventListener("input", function () {
       var val = parseInt(sizeSlider.value, 10);
-      sizeDisplay.textContent = val + "px";
+      sizeDisplay.textContent = formatSizeDeltaLabel(val);
       debouncedSetSize(val);
     });
 
     sizeReset.addEventListener("click", function () {
       plugin.setFontSize(0);
-      sizeSlider.value = "16";
+      sizeSlider.value = "0";
       sizeDisplay.textContent = plugin.t("default");
       showMessage(plugin.t("fontSizeReset"), 2000);
     });
