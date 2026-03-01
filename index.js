@@ -5,7 +5,7 @@ const { Plugin, showMessage, Setting, Dialog } = require("siyuan");
 const PLUGIN_NAME = "siyuan-plugin-font-manager";
 const STORAGE_KEY = "settings";
 const FONT_DIR = `/data/public/${PLUGIN_NAME}/fonts`;
-const LEGACY_FONT_DIR = `/data/storage/petal/${PLUGIN_NAME}/fonts`;
+const SETTINGS_FILE = `/data/storage/petal/${PLUGIN_NAME}/${STORAGE_KEY}`;
 
 const TOPBAR_ICON = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 7V4h16v3"/><path d="M9 20h6"/><path d="M12 4v16"/></svg>`;
 
@@ -231,10 +231,10 @@ class FontManagerPlugin extends Plugin {
     try {
       await removeFile(FONT_DIR);
     } catch (e) { /* directory may not exist */ }
-    // Also clean up old storage path from previous versions
+    // Clean up plugin settings storage file
     try {
-      await removeFile(LEGACY_FONT_DIR);
-    } catch (e) { /* directory may not exist */ }
+      await removeFile(SETTINGS_FILE);
+    } catch (e) { /* file may not exist */ }
   }
 
   openSetting() {
