@@ -536,7 +536,26 @@ class FontManagerPlugin extends Plugin {
     if (el.classList && (el.classList.contains("b3-icon") || el.classList.contains("fn__icon"))) {
       return false;
     }
+    // Never write inline font-size markers into editable document content.
+    // Those inline styles can be serialized by editor operations (e.g. table input).
+    if (el.isContentEditable) return false;
+    if (el.matches("[contenteditable='true'], [contenteditable='plaintext-only']")) return false;
+    if (el.closest("[contenteditable='true'], [contenteditable='plaintext-only']")) return false;
+    if (el.closest(".protyle-wysiwyg, .protyle-title")) return false;
+    if (el.hasAttribute("data-node-id") || el.closest("[data-node-id]")) return false;
     return true;
+  }
+
+  purgeInvalidFontSizeTargets() {
+    if (typeof document === "undefined") return;
+    var marked = document.querySelectorAll("[" + FONT_SIZE_BASE_ATTR + "='1']");
+    for (var i = 0; i < marked.length; i++) {
+      var el = marked[i];
+      if (!(el instanceof HTMLElement)) continue;
+      if (this.isFontSizePatchTarget(el)) continue;
+      el.removeAttribute(FONT_SIZE_BASE_ATTR);
+      el.style.removeProperty(FONT_SIZE_BASE_VAR);
+    }
   }
 
   captureElementBaseFontSize(el, subtractDelta) {
@@ -687,6 +706,7 @@ class FontManagerPlugin extends Plugin {
     // Apply font size delta to both UI and editor base sizes.
     var fontSizeDelta = Number(this.settingsData.fontSizeDelta) || 0;
     if (fontSizeDelta !== 0) {
+      this.purgeInvalidFontSizeTargets();
       if (!this._fontSizeBaseReady) {
         this.captureDomBaseFontSizes(null, 0);
         this._fontSizeBaseReady = true;
